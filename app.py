@@ -22,8 +22,15 @@ def get_db():
 def get_all_expenses(db: Session):
     return db.query(Expense).order_by(Expense.date.desc()).all()
 
-def save_expense(db: Session, data):
-    # Automatikus mentés jóváhagyás nélkül
+# Csak az AI által elemzett utolsó 10 tétel
+def get_ai_expenses(db: Session, limit=10):
+    return db.query(Expense)\
+             .filter(Expense.source == "AI")\
+             .order_by(Expense.id.desc())\
+             .limit(limit)\
+             .all()
+
+def save_expense(db: Session, data, source="Manual"):
     try:
         new_expense = Expense(
             merchant=data.get('merchant', 'Ismeretlen'),
@@ -31,7 +38,8 @@ def save_expense(db: Session, data):
             currency=data.get('currency', 'HUF'),
             category=data.get('category', 'Egyéb'),
             date=data.get('date'),
-            items=data.get('items', [])
+            items=data.get('items', []),
+            source=source
         )
         db.add(new_expense)
         db.commit()
@@ -42,7 +50,6 @@ def save_expense(db: Session, data):
         return False
 
 def update_database(db: Session, edited_df: pd.DataFrame):
-    # Frissítés szerkesztés után
     try:
         for index, row in edited_df.iterrows():
             expense_id = int(row["ID"])
@@ -52,23 +59,14 @@ def update_database(db: Session, edited_df: pd.DataFrame):
                 record.total_amount = row["Összeg"]
                 record.category = row["Kategória"]
                 record.currency = row["Pénznem"]
-                # Dátumot itt most egyszerűsítve kezeljük, feltételezzük, hogy string marad
-                # record.date = ... 
+                record.date = row["Dátum"] # Most már a dátumot is frissítjük!
         db.commit()
         return True
     except Exception as e:
         st.error(f"Hiba a mentésnél: {e}")
         return False
 
-def delete_expense(db: Session, expense_id: int):
-    record = db.query(Expense).filter(Expense.id == expense_id).first()
-    if record:
-        db.delete(record)
-        db.commit()
-        return True
-    return False
-
-# --- STÍLUS (Sötét módhoz optimalizálva) ---
+# --- STÍLUS ---
 st.markdown("""
     <style>
     div[data-testid="stMetric"] {
@@ -84,161 +82,147 @@ st.markdown("""
 # --- FŐ CÍMSOR ---
 st.title("💰 SpendSmart Auto-Pilot")
 
-# --- OLDALSÁV (Gyors Feltöltés) ---
+# --- OLDALSÁV (Feltöltés) ---
 st.sidebar.header("⚡ Gyors Feltöltés")
+uploaded_file = st.sidebar.file_uploader("Blokk fotó feltöltése", type=["jpg", "jpeg", "png"], key="uploader")
 
-# Egyedi kulcsot (key) adunk a feltöltőnek, hogy a Streamlit ne keverje össze
-uploaded_file = st.sidebar.file_uploader(
-    "Blokk fotó feltöltése", 
-    type=["jpg", "jpeg", "png"], 
-    key="receipt_uploader"
-)
-
-# Csak akkor mutatjuk a gombot, ha van feltöltött fájl
 if uploaded_file is not None:
-    # Megjelenítjük a képet kicsiben, hogy lásd mit töltöttél fel
     st.sidebar.image(uploaded_file, caption="Előnézet", use_container_width=True)
     
-    # A gomb indítja a folyamatot - ez a legbiztosabb módszer
     if st.sidebar.button("🚀 Feldolgozás Indítása", type="primary"):
-        
         with st.sidebar.status("🤖 AI Feldolgozás...", expanded=True) as status:
             try:
-                # 1. Ideiglenes mentés
+                # 1. Kép mentése
                 temp_filename = "temp_receipt.jpg"
                 with open(temp_filename, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 
-                # 2. Elemzés
+                # 2. AI Elemzés
                 status.write("Kép küldése az AI-nak...")
                 extracted_data = extract_receipt_data(temp_filename)
                 
-                # Takarítás
                 if os.path.exists(temp_filename):
                     os.remove(temp_filename)
                 
-                # 3. Mentés
+                # 3. Mentés source="AI" jelöléssel
                 if extracted_data:
                     status.write("Mentés adatbázisba...")
                     db = next(get_db())
                     
-                    if save_expense(db, extracted_data):
+                    if save_expense(db, extracted_data, source="AI"):
                         status.update(label="✅ SIKER! Mentve.", state="complete", expanded=False)
-                        time.sleep(1) # Egy kis szünet, hogy lásd a pipát
-                        st.rerun() # Oldal frissítése
+                        time.sleep(1)
+                        st.rerun()
                     else:
                         status.update(label="❌ Adatbázis hiba", state="error")
                 else:
                     status.update(label="❌ AI hiba: Nem jött adat", state="error")
-                    st.sidebar.error("Az AI nem talált adatokat a képen.")
-            
             except Exception as e:
-                status.update(label="❌ Váratlan hiba", state="error")
-                st.sidebar.error(f"Hiba történt: {e}")
+                status.update(label="❌ Hiba", state="error")
+                st.sidebar.error(f"{e}")
 
 # --- ADATOK BETÖLTÉSE ---
 db = next(get_db())
-expenses = get_all_expenses(db)
+all_expenses = get_all_expenses(db)
+ai_expenses = get_ai_expenses(db)
 
-if expenses:
-    # Pandas DataFrame
-    data = [
-        {
-            "ID": e.id,
-            "Dátum": e.date,
-            "Bolt": e.merchant,
-            "Összeg": float(e.total_amount),
-            "Pénznem": e.currency,
-            "Kategória": e.category
-        } 
-        for e in expenses
-    ]
-    df = pd.DataFrame(data)
+# Fő lista DataFrame
+df_all = pd.DataFrame()
+if all_expenses:
+    df_all = pd.DataFrame([{
+        "ID": e.id, "Dátum": e.date, "Bolt": e.merchant, 
+        "Összeg": float(e.total_amount), "Pénznem": e.currency, "Kategória": e.category
+    } for e in all_expenses])
 
-    # --- KERESÉS ---
-    col_search, _ = st.columns([1, 2])
-    search_term = col_search.text_input("🔍 Keresés név alapján...", placeholder="Pl. Tesco")
+# AI lista DataFrame (Most már minden oszlop benne van!)
+df_ai = pd.DataFrame()
+if ai_expenses:
+    df_ai = pd.DataFrame([{
+        "ID": e.id, 
+        "Dátum": e.date,          # <--- BEKERÜLT
+        "Bolt": e.merchant, 
+        "Összeg": float(e.total_amount), 
+        "Pénznem": e.currency,    # <--- BEKERÜLT
+        "Kategória": e.category,
+    } for e in ai_expenses])
 
-    if search_term:
-        df = df[df["Bolt"].str.contains(search_term, case=False, na=False)]
+# --- LAYOUT: KÉT OSZLOP ---
+col_main, col_right = st.columns([2.5, 1.5]) # Kicsit szélesítettem a jobb oldalon (1.2 -> 1.5)
 
-    # --- KÉT OSZLOPOS ELRENDEZÉS (Bal: Fő, Jobb: Utolsó 10) ---
-    col_main, col_right = st.columns([3, 1]) 
-
-    # --- JOBB OSZLOP: Legutóbbi 10 (Hibajavító sarok) ---
-    with col_right:
-        st.subheader("⏱️ Legutóbbi 10")
-        st.caption("Gyors ellenőrzés: Ha hibásat látsz, itt javíthatod.")
-        
-        # Csak az első 10 sor (mivel dátum szerint csökkenőben van)
-        latest_10 = df.head(10)
-        
-        edited_latest = st.data_editor(
-            latest_10,
+# >>> JOBB OSZLOP: AI NAPLÓ (Részletes) <<<
+with col_right:
+    st.subheader("🤖 AI Napló (Utolsó 10)")
+    st.caption("Itt látod, mit olvasott be a gép. Javítsd, ha tévedett!")
+    
+    if not df_ai.empty:
+        edited_ai = st.data_editor(
+            df_ai,
             hide_index=True,
             use_container_width=True,
             column_config={
-                "ID": None, # Elrejtjük az ID-t, hogy ne foglalja a helyet
-                "Dátum": None, # Dátumot is elrejtjük a kompakt nézetben (opcionális)
-                "Összeg": st.column_config.NumberColumn(format="%d"),
-                "Pénznem": None,
-                "Bolt": st.column_config.TextColumn("Bolt", width="small"),
+                "ID": None, # Ezt továbbra is elrejtjük, mert technikai adat
+                "Dátum": st.column_config.DateColumn("Dátum", width="small"), # Látható!
+                "Pénznem": st.column_config.TextColumn("Deviza", width="small"), # Látható!
+                "Bolt": st.column_config.TextColumn("Bolt", width="medium"),
+                "Összeg": st.column_config.NumberColumn("Összeg", format="%d"),
                 "Kategória": st.column_config.SelectboxColumn(
+                    "Kat.",
                     options=["Food", "Travel", "Entertainment", "Utilities", "Other"],
-                    width="small"
+                    width="medium"
                 )
             },
-            key="latest_editor"
+            key="ai_editor"
         )
         
-        if st.button("Mentés (Jobb sáv)", key="save_right"):
-            if update_database(db, edited_latest):
-                st.toast("✅ Javítások mentve!")
+        if st.button("Javítások Mentése (AI Sáv)", type="primary"):
+            if update_database(db, edited_ai):
+                st.toast("✅ Javítva!")
                 time.sleep(1)
                 st.rerun()
+    else:
+        st.info("Még nincs AI által feltöltött adat.")
 
-    # --- BAL OSZLOP: Fő Statisztikák és Teljes Lista ---
-    with col_main:
+# >>> BAL OSZLOP: STATISZTIKA ÉS TELJES LISTA <<<
+with col_main:
+    if not df_all.empty:
         # KPI
         c1, c2, c3 = st.columns(3)
-        c1.metric("Összes Költés", f"{df['Összeg'].sum():,.0f} Ft")
-        c2.metric("Tranzakciók", f"{len(df)} db")
-        c3.metric("Átlag", f"{df['Összeg'].mean():,.0f} Ft")
-
+        c1.metric("Összes Költés", f"{df_all['Összeg'].sum():,.0f} Ft")
+        c2.metric("Tranzakciók", f"{len(df_all)} db")
+        c3.metric("Átlag", f"{df_all['Összeg'].mean():,.0f} Ft")
+        
         st.markdown("---")
 
         # Grafikonok
         gc1, gc2 = st.columns(2)
         with gc1:
-            fig_pie = px.pie(df, values='Összeg', names='Kategória', hole=0.4, 
+            fig_pie = px.pie(df_all, values='Összeg', names='Kategória', hole=0.4, 
                              color_discrete_sequence=px.colors.qualitative.Pastel)
-            fig_pie.update_layout(showlegend=False, margin=dict(t=0, b=0, l=0, r=0), height=250)
+            fig_pie.update_layout(showlegend=False, margin=dict(t=0,b=0,l=0,r=0), height=250)
             st.plotly_chart(fig_pie, use_container_width=True)
-        
         with gc2:
-            daily = df.groupby("Dátum")["Összeg"].sum().reset_index()
+            daily = df_all.groupby("Dátum")["Összeg"].sum().reset_index()
             fig_bar = px.bar(daily, x="Dátum", y="Összeg")
-            fig_bar.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=250)
+            fig_bar.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=250)
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # Teljes szerkeszthető lista
-        st.subheader("📜 Teljes Előzmények")
-        edited_full = st.data_editor(
-            df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "ID": st.column_config.NumberColumn(disabled=True),
-                "Összeg": st.column_config.NumberColumn(format="%d Ft"),
-            },
-            key="full_editor"
-        )
+        st.markdown("---")
         
-        if st.button("Változások Mentése (Teljes lista)", key="save_main"):
-            if update_database(db, edited_full):
-                st.toast("✅ Mentve!")
-                time.sleep(1)
-                st.rerun()
+        # Kereső és Teljes Lista
+        st.subheader("🗂️ Teljes Archívum")
+        search_term = st.text_input("Keresés:", placeholder="Bolt neve...")
+        
+        if search_term:
+            df_filtered = df_all[df_all["Bolt"].str.contains(search_term, case=False, na=False)]
+        else:
+            df_filtered = df_all
 
-else:
-    st.info("Nincs megjeleníthető adat. Tölts fel egy blokkot bal oldalt!")
+        st.dataframe(
+            df_filtered, 
+            hide_index=True, 
+            use_container_width=True,
+            column_config={"ID": None}
+        )
+
+    else:
+        st.info("Nincs adat. Tölts fel valamit!")

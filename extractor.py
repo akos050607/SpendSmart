@@ -82,8 +82,7 @@ def extract_receipt_data(image_path):
 
         response = client.chat.completions.create(
             # Javasolt ingyenes modell OpenRouteren képekhez:
-            model="google/gemini-2.0-flash-lite-preview-02-05:free", 
-            # Ha fizetősöd van, használd ezt: "openai/gpt-4o-mini",
+            model="openai/gpt-4o-mini", 
             
             messages=[
                 {"role": "system", "content": system_prompt},

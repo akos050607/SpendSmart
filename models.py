@@ -24,3 +24,4 @@ class Expense(Base):
     currency = Column(String)       # Currency (HUF)
     category = Column(String)       # Category (Food)
     items = Column(JSON, nullable=True)
+    source = Column(String, default="Manual")  # Source of the data (Manual, OCR, etc.)
