@@ -84,36 +84,57 @@ st.markdown("""
 # --- FŐ CÍMSOR ---
 st.title("💰 SpendSmart Auto-Pilot")
 
-# --- OLDALSÁV (Csak feltöltés) ---
+# --- OLDALSÁV (Gyors Feltöltés) ---
 st.sidebar.header("⚡ Gyors Feltöltés")
-uploaded_file = st.sidebar.file_uploader("Blokk fotó (Automatikus mentés)", type=["jpg", "jpeg", "png"])
 
+# Egyedi kulcsot (key) adunk a feltöltőnek, hogy a Streamlit ne keverje össze
+uploaded_file = st.sidebar.file_uploader(
+    "Blokk fotó feltöltése", 
+    type=["jpg", "jpeg", "png"], 
+    key="receipt_uploader"
+)
+
+# Csak akkor mutatjuk a gombot, ha van feltöltött fájl
 if uploaded_file is not None:
-    # Csak akkor futtatjuk, ha ez egy új fájl (elkerüljük az újrafutást)
-    if 'last_uploaded_file' not in st.session_state or st.session_state.last_uploaded_file != uploaded_file.name:
-        st.session_state.last_uploaded_file = uploaded_file.name
+    # Megjelenítjük a képet kicsiben, hogy lásd mit töltöttél fel
+    st.sidebar.image(uploaded_file, caption="Előnézet", use_container_width=True)
+    
+    # A gomb indítja a folyamatot - ez a legbiztosabb módszer
+    if st.sidebar.button("🚀 Feldolgozás Indítása", type="primary"):
         
         with st.sidebar.status("🤖 AI Feldolgozás...", expanded=True) as status:
-            # 1. Mentés
-            temp_filename = "temp_receipt.jpg"
-            with open(temp_filename, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+            try:
+                # 1. Ideiglenes mentés
+                temp_filename = "temp_receipt.jpg"
+                with open(temp_filename, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                # 2. Elemzés
+                status.write("Kép küldése az AI-nak...")
+                extracted_data = extract_receipt_data(temp_filename)
+                
+                # Takarítás
+                if os.path.exists(temp_filename):
+                    os.remove(temp_filename)
+                
+                # 3. Mentés
+                if extracted_data:
+                    status.write("Mentés adatbázisba...")
+                    db = next(get_db())
+                    
+                    if save_expense(db, extracted_data):
+                        status.update(label="✅ SIKER! Mentve.", state="complete", expanded=False)
+                        time.sleep(1) # Egy kis szünet, hogy lásd a pipát
+                        st.rerun() # Oldal frissítése
+                    else:
+                        status.update(label="❌ Adatbázis hiba", state="error")
+                else:
+                    status.update(label="❌ AI hiba: Nem jött adat", state="error")
+                    st.sidebar.error("Az AI nem talált adatokat a képen.")
             
-            # 2. Elemzés
-            status.write("Kép elemzése...")
-            extracted_data = extract_receipt_data(temp_filename)
-            os.remove(temp_filename)
-            
-            # 3. Azonnali Mentés
-            if extracted_data:
-                status.write("Mentés adatbázisba...")
-                db = next(get_db())
-                if save_expense(db, extracted_data):
-                    status.update(label="✅ Kész! Mentve.", state="complete", expanded=False)
-                    time.sleep(1)
-                    st.rerun() # Oldal frissítése, hogy látszódjon az új adat
-            else:
-                status.update(label="❌ Hiba történt", state="error")
+            except Exception as e:
+                status.update(label="❌ Váratlan hiba", state="error")
+                st.sidebar.error(f"Hiba történt: {e}")
 
 # --- ADATOK BETÖLTÉSE ---
 db = next(get_db())
